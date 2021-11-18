@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-    "net"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,34 +23,34 @@ type AuthProxyServer struct {
 	// basic 認証の情報 -> true の map
 	idPassBasicMap map[string]bool
 	// forwardProxy
-	forwardProxy string
-    privateForward bool
+	forwardProxy   string
+	privateForward bool
 }
 
-func setupGoproxy( proxy *goproxy.ProxyHttpServer ) {
-    // 処理経過の出力
+func setupGoproxy(proxy *goproxy.ProxyHttpServer) {
+	// 処理経過の出力
 	proxy.Verbose = true
-    // 環境変数の proxy 設定を無視するように
-    proxy.Tr.Proxy = nil
+	// 環境変数の proxy 設定を無視するように
+	proxy.Tr.Proxy = nil
 	proxy.ConnectDial = nil
 }
 
 func newAuthProxyServer(
-	port int, forwardProxy string, user string, privateForward bool ) *AuthProxyServer {
+	port int, forwardProxy string, user string, privateForward bool) *AuthProxyServer {
 	proxyForConnect := goproxy.NewProxyHttpServer()
 	proxyForNormal := goproxy.NewProxyHttpServer()
 
-    setupGoproxy( proxyForConnect )
-    setupGoproxy( proxyForNormal )
+	setupGoproxy(proxyForConnect)
+	setupGoproxy(proxyForNormal)
 
 	log.Printf("forwardProxy: %s\n", forwardProxy)
 	authProxyServer := AuthProxyServer{
-        proxyForConnect, proxyForNormal,
-        map[string]bool{}, forwardProxy, privateForward,
-    }
+		proxyForConnect, proxyForNormal,
+		map[string]bool{}, forwardProxy, privateForward,
+	}
 	if user != "" {
-        auth := base64.StdEncoding.EncodeToString( []byte(user) )
-		authProxyServer.idPassBasicMap[ auth ] = true
+		auth := base64.StdEncoding.EncodeToString([]byte(user))
+		authProxyServer.idPassBasicMap[auth] = true
 	}
 
 	return &authProxyServer
@@ -63,7 +63,7 @@ func (proxy *AuthProxyServer) checkAuth(auth string) string {
 	if strings.Index(auth, "Basic ") != 0 {
 		return "illegal auth basic\n"
 	}
-    idpass := auth[6:]
+	idpass := auth[6:]
 	if _, has := proxy.idPassBasicMap[idpass]; !has {
 		return "unmatch id/pass\n"
 	}
@@ -114,11 +114,11 @@ func (proxy *AuthProxyServer) forward(respWriter http.ResponseWriter, req *http.
 
 func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 
-    log.Printf( "RemoteAddr: %s", req.RemoteAddr )
-    
+	log.Printf("RemoteAddr: %s", req.RemoteAddr)
+
 	if len(proxy.idPassBasicMap) != 0 {
 		for key := range req.Header {
-			log.Printf("header = %s, val = %s", key, req.Header.Get( key ))
+			log.Printf("header = %s, val = %s", key, req.Header.Get(key))
 		}
 		authResult := proxy.checkAuth(req.Header.Get("Proxy-Authorization"))
 		if authResult != "" {
@@ -129,24 +129,24 @@ func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Requ
 		}
 	}
 
-    privateAccess := false
-    if hostIp := net.ParseIP(req.URL.Hostname()); hostIp != nil {
-        privateAccess = hostIp.IsPrivate()
-    }
-    
+	privateAccess := false
+	if hostIp := net.ParseIP(req.URL.Hostname()); hostIp != nil {
+		privateAccess = hostIp.IsPrivate()
+	}
+
 	if proxy.forwardProxy == "" {
 		// forwardProxy がない場合は、 goproxy に処理を任せる
-        log.Printf( "proxy: %s", req.URL.String() )
+		log.Printf("proxy: %s", req.URL.String())
 		proxy.proxyForNormal.ServeHTTP(resp, req)
 	} else if privateAccess && !proxy.privateForward {
 		// forwardProxy が指定されていても private アドレスアクセスの場合は、
-        // forwardProxy は使用しない。
-        log.Printf( "skip forward: %s", req.URL.String() )
+		// forwardProxy は使用しない。
+		log.Printf("skip forward: %s", req.URL.String())
 		proxy.proxyForNormal.ServeHTTP(resp, req)
-    } else if req.Method == "CONNECT" {
+	} else if req.Method == "CONNECT" {
 		// forwardProxy の指定があり CONNECT の場合は、
 		// Proxy-Authenticate を付けなおす。
-        log.Printf( "forward CONNECT: %s", req.URL.String() )
+		log.Printf("forward CONNECT: %s", req.URL.String())
 		proxy.proxyForConnect.ConnectDial = proxy.proxyForConnect.NewConnectDialToProxyWithHandler(
 			proxy.forwardProxy, func(forwardReq *http.Request) {
 				auth := req.Header.Get("Proxy-Authorization")
@@ -180,8 +180,7 @@ func main() {
 	portOpt := cmd.Int("p", 0, "port (mandatory)")
 	userOpt := cmd.String("user", "", "proxy id:pass. e.g. id=123, pass=abc, -user 123:abc")
 	forwardProxy := cmd.String("forward", "", "forward proxy (http://proxy.addr:port/). pass this auth.")
-    privateForward := cmd.Bool( "pf", false, "When host is private address, it uses forwarding." )
-
+	privateForward := cmd.Bool("pf", false, "When host is private address, it uses forwarding.")
 
 	cmd.Parse(os.Args[1:])
 
@@ -193,7 +192,7 @@ func main() {
 		cmd.Usage()
 	}
 
-	proxy := newAuthProxyServer(port, *forwardProxy, *userOpt, *privateForward )
+	proxy := newAuthProxyServer(port, *forwardProxy, *userOpt, *privateForward)
 
 	log.Print("start -- ", port)
 
