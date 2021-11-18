@@ -1,0 +1,58 @@
+# -*- coding:utf-8 -*-
+#+AUTHOR: ifritJP
+#+STARTUP: nofold
+#+OPTIONS: ^:{}
+
+#+TITLE: simple proxy
+
+これは、シンプルな http proxy です。
+
+* 特徴
+
+- この proxy は、以下の機能を提供します。
+  - プロキシ認証機能 (on/off)
+  - プロキシの forward 機能 (on/off)
+- go で実装しているため、さまざまな環境へ簡単に導入できます。
+- テストなどで一時的に proxy を使いたい場合に、
+  インストールや設定の手間なくコマンド 1 つで動きます。
+
+* 使用方法
+
+使用例
+
+: simple-proxy -user 123:abc -p 80 -forward http://proxy.com:8080/
+
+- プロキシ認証
+  - id に 123 を指定
+  - pass に abc を指定
+- proxy のポートに 80 を指定
+- forward 先に =http://proxy.com:8080/= を指定
+  
+
+** オプション
+  
+- p
+  - proxy の listen ポートを指定します。 これは必須です。
+- forward
+  - forward 先の proxy を指定します。
+  - このオプションを指定しない場合、 forward しません。
+  - forward することで、多段 proxy を構築できます。
+  - forward 先の proxy 認証には、 forward するセッションに指定されたものを使用します。
+  - セッションを forward するかどうかは、
+    そのセッションの request 先のホストのアドレスによって切り替えます。
+  - request 先のホストのアドレスがプライベートアドレスでない場合、
+    セッションを forward します。
+  - 逆にプライベートアドレスの場合、forward しません。
+  - この動作は pf オプションで切り替えられます。
+  - DNS を使ったホスト名の IP アドレス変換は行ないません。
+    ホスト名が IP アドレス指定でない場合は、
+    プライベートアドレスではないと判断します。
+- pf
+  - このオプションが指定されている場合、
+    プライベートアドレスであっても forward します。
+  - forward オプションが指定されている必要があります。
+- user
+  - proxy 認証の ID/PASS を登録します。
+  - オプションを指定しない場合、認証なしの動作になります。
+- help
+  ヘルプを表示します。
