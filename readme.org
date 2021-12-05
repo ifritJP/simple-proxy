@@ -55,7 +55,7 @@
     - 認証しません
   - pass
     - この proxy と同じ認証を使用します
-  - spec:id:pass
+  - =spec:id:pass=
     - 指定の id:pass を利用します
 - pf
   - このオプションが指定されている場合、

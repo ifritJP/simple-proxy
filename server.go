@@ -15,7 +15,7 @@ import (
 	"github.com/elazarl/goproxy"
 )
 
-// forwardProxy に渡す auth 情報
+// forwardProxyUrl に渡す auth 情報
 // なし
 const ForwardProxyAuthModeNone = 0
 // この proxy と同じ
@@ -31,12 +31,13 @@ type AuthProxyServer struct {
 	// basic 認証の情報 -> true の map
 	idPassBasicMap map[string]bool
 	// forwardProxy
-	forwardProxy   string
+	forwardProxyUrl   string
 	privateForward bool
     forwardProxyAuthMode int
     forwardProxyAuth string
     // 受け入れ可能な IP
     acceptableIPList []net.IPNet
+    pacCtrl *PacCtrl
 }
 
 func setupGoproxy(proxy *goproxy.ProxyHttpServer) {
@@ -48,13 +49,25 @@ func setupGoproxy(proxy *goproxy.ProxyHttpServer) {
 }
 
 func newAuthProxyServer(
-	port int, forwardProxy string, user string, privateForward bool,
+	port int, forwardProxyUrl string, user string, privateForward bool,
     forwardProxyAuthMode int, forwardProxyAuth string,
-    acceptableIPList []net.IPNet ) *AuthProxyServer {
-	log.Printf("forwardProxy: %s\n", forwardProxy)
+    acceptableIPList []net.IPNet, pacUrl string ) *AuthProxyServer {
+	log.Printf("forwardProxyUrl: %s\n", forwardProxyUrl)
+
+
+    var pacCtrl *PacCtrl
+    if pacUrl != "" {
+        if workPacCtrl, err := getProxyPacCtrl( pacUrl ); err != nil {
+            log.Fatal( err )
+        } else {
+            pacCtrl = workPacCtrl
+        }
+    }
+    //fmt.Print( pacCtrl.getProxyUrlTxt( "https://www.yahoo.co.jp" ) )
+    
 	authProxyServer := AuthProxyServer{
-		map[string]bool{}, forwardProxy, privateForward,
-        forwardProxyAuthMode, forwardProxyAuth, acceptableIPList,
+		map[string]bool{}, forwardProxyUrl, privateForward,
+        forwardProxyAuthMode, forwardProxyAuth, acceptableIPList, pacCtrl,
     }
 	if user != "" {
 		auth := base64.StdEncoding.EncodeToString([]byte(user))
@@ -85,7 +98,7 @@ func (proxy *AuthProxyServer) checkAuth(auth string) string {
 // @param req forward 元の request
 func (proxy *AuthProxyServer) setProxyAuth( forwardReq, req *http.Request ) {
     if proxy.forwardProxyAuthMode == ForwardProxyAuthModeNone {
-        // proxy 認証情報を forwardProxy に渡さない
+        // proxy 認証情報を forwardProxyUrl に渡さない
     } else if proxy.forwardProxyAuthMode == ForwardProxyAuthModePass {
         // この proxy と同じ認証情報を使用する
         forwardReq.Header.Add( ProxyAuthHeaderName, req.Header.Get(ProxyAuthHeaderName) )
@@ -95,17 +108,30 @@ func (proxy *AuthProxyServer) setProxyAuth( forwardReq, req *http.Request ) {
     }
 }
 
-func (proxy *AuthProxyServer) forward(respWriter http.ResponseWriter, req *http.Request) int {
+func (proxy *AuthProxyServer) getFowardProxyUrl( req *http.Request) string {
+    if proxy.pacCtrl == nil {
+        return proxy.forwardProxyUrl
+    }
+    url, err := proxy.pacCtrl.getProxyUrlTxt( req.URL.String() );
+    if err != nil {
+        log.Fatal( err )
+    }
+    return url
+}
+
+func (proxy *AuthProxyServer) forward(
+    forwardProxyUrl string, 
+    respWriter http.ResponseWriter, req *http.Request) int {
 	log.Printf("forward: %s\n", req.URL.String())
 
-	forwardProxyUrl, err := url.Parse(proxy.forwardProxy)
+	forwardUrl, err := url.Parse( forwardProxyUrl )
 	if err != nil {
 		log.Println(err)
 		return 500
 	}
 
 	transport := &http.Transport{
-		Proxy: http.ProxyURL(forwardProxyUrl),
+		Proxy: http.ProxyURL(forwardUrl),
 	}
 	client := &http.Client{
 		Transport: transport,
@@ -190,28 +216,32 @@ func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Requ
 	aGoproxy := goproxy.NewProxyHttpServer()
 	setupGoproxy( aGoproxy )
 
-	if proxy.forwardProxy == "" {
-		// forwardProxy がない場合は、 goproxy に処理を任せる
+    forwardProxyUrl := proxy.getFowardProxyUrl( req )
+
+    log.Printf( "forwardProxyUrl -- %s", forwardProxyUrl )
+
+	if forwardProxyUrl == "" {
+		// forwardProxyUrl がない場合は、 goproxy に処理を任せる
 		log.Printf("proxy: %s", req.URL.String())
 		aGoproxy.ServeHTTP(resp, req)
 	} else if privateAccess && !proxy.privateForward {
-		// forwardProxy が指定されていても private アドレスアクセスの場合は、
-		// forwardProxy は使用しない。
+		// forwardProxyUrl が指定されていても private アドレスアクセスの場合は、
+		// forwardProxyUrl は使用しない。
 		log.Printf("skip forward: %s", req.URL.String())
 		aGoproxy.ServeHTTP(resp, req)
 	} else if req.Method == "CONNECT" {
-		// forwardProxy の指定があり CONNECT の場合は、
+		// forwardProxyUrl の指定があり CONNECT の場合は、
 		// Proxy-Authenticate を付けなおす。
 		log.Printf("forward CONNECT: %s", req.URL.String())
 		aGoproxy.ConnectDial = aGoproxy.NewConnectDialToProxyWithHandler(
-			proxy.forwardProxy, func(forwardReq *http.Request) {
+			forwardProxyUrl, func(forwardReq *http.Request) {
                 proxy.setProxyAuth( forwardReq, req )
 			})
 		aGoproxy.ServeHTTP(resp, req)
 	} else {
-		// 通常の http 処理で、 forwardProxy が設定されている場合は、
+		// 通常の http 処理で、 forwardProxyUrl が設定されている場合は、
 		// ここで forward する。
-		code := proxy.forward(resp, req)
+		code := proxy.forward(forwardProxyUrl, resp, req)
 		if code != 0 {
 			resp.WriteHeader(code)
 		}
@@ -232,13 +262,16 @@ func main() {
 
 	portOpt := cmd.Int("p", 0, "port (mandatory)")
 	userOpt := cmd.String("user", "", "proxy id:pass. e.g. id=123, pass=abc, -user 123:abc")
-	forwardProxy := cmd.String("forward", "", "forward proxy (http://proxy.addr:port/). pass this auth.")
+	forwardProxyUrl := cmd.String("forward", "", "forward proxy (e.g. http://proxy.addr:port/). pass this auth.")
 	privateForward := cmd.Bool("pf", false, "When host is private address, it uses forwarding.")
     forwardProxyAuthModeStr := cmd.String(
         "forwardAuth", "pass",
         "forward proxy auth mode. \n   - none\n   - pass\n   - spec:id:pass\n" )
     acceptableIP := cmd.String(
         "aip", "", "accepable IP. \n  e.g. 192.168.0.1/24\n       192.168.0.1/32" )
+    forwardPacUrl := cmd.String(
+        "forwardPac", "",
+        "forward proxy pac url. e.g. http://proxy.addr/proxy.pac" )
 
 	cmd.Parse(os.Args[1:])
 
@@ -271,8 +304,8 @@ func main() {
     }
 
 	proxy := newAuthProxyServer(
-        port, *forwardProxy, *userOpt, *privateForward,
-        forwardProxyAuthMode, forwardProxyAuth, acceptableIPList )
+        port, *forwardProxyUrl, *userOpt, *privateForward,
+        forwardProxyAuthMode, forwardProxyAuth, acceptableIPList, *forwardPacUrl )
 
 	log.Print("start -- ", port)
 

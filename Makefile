@@ -1,5 +1,5 @@
 all:
-	go build -o simple-proxy server.go
+	go build -o simple-proxy
 
 
 all-win:
