@@ -3,4 +3,4 @@ all:
 
 
 all-win:
-	GOARCH=386 GOOS=windows go build -o simple-proxy.exe server.go
+	GOARCH=386 GOOS=windows go build -o simple-proxy.exe

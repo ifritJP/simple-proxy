@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -132,6 +133,10 @@ func (proxy *AuthProxyServer) forward(
 
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(forwardUrl),
+        TLSClientConfig: &tls.Config{
+            // proxy サーバの CA 認証チェックしない
+            InsecureSkipVerify: true,
+        },        
 	}
 	client := &http.Client{
 		Transport: transport,
@@ -162,6 +167,12 @@ func (proxy *AuthProxyServer) forward(
 		return 500
 	}
 
+	for key, valList := range forwardResp.Header {
+		for _, val := range valList {
+            respWriter.Header().Add( key, val )
+		}
+	}
+    
 	respWriter.WriteHeader(forwardResp.StatusCode)
 	respWriter.Write(data)
 	return 0
@@ -227,7 +238,7 @@ func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Requ
 	} else if privateAccess && !proxy.privateForward {
 		// forwardProxyUrl が指定されていても private アドレスアクセスの場合は、
 		// forwardProxyUrl は使用しない。
-		log.Printf("skip forward: %s", req.URL.String())
+		log.Printf("skip to forward: %s", req.URL.String())
 		aGoproxy.ServeHTTP(resp, req)
 	} else if req.Method == "CONNECT" {
 		// forwardProxyUrl の指定があり CONNECT の場合は、
@@ -272,6 +283,9 @@ func main() {
     forwardPacUrl := cmd.String(
         "forwardPac", "",
         "forward proxy pac url. e.g. http://proxy.addr/proxy.pac" )
+    enableHttps := cmd.Bool(
+        "https", false, "This option enable https listening" )
+        
 
 	cmd.Parse(os.Args[1:])
 
@@ -309,5 +323,10 @@ func main() {
 
 	log.Print("start -- ", port)
 
-	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), proxy))
+    service := fmt.Sprintf(":%d", port)
+    if *enableHttps {
+        log.Fatal(http.ListenAndServeTLS(service, "server.crt", "server.key", proxy))
+    } else {
+        log.Fatal(http.ListenAndServe(service, proxy))
+    }
 }
