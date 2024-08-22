@@ -1,11 +1,11 @@
 package main
 
 import (
-	"encoding/base64"
 	"crypto/tls"
+	"encoding/base64"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -19,26 +19,33 @@ import (
 // forwardProxyUrl に渡す auth 情報
 // なし
 const ForwardProxyAuthModeNone = 0
+
 // この proxy と同じ
 const ForwardProxyAuthModePass = 1
+
 // 別に指定
 const ForwardProxyAuthModeSpec = 2
 
 // proxy-authorization ヘッダ名
 const ProxyAuthHeaderName = "proxy-authorization"
 
-
 type AuthProxyServer struct {
 	// basic 認証の情報 -> true の map
 	idPassBasicMap map[string]bool
 	// forwardProxy
-	forwardProxyUrl   string
-	privateForward bool
-    forwardProxyAuthMode int
-    forwardProxyAuth string
-    // 受け入れ可能な IP
-    acceptableIPList []net.IPNet
-    pacCtrl *PacCtrl
+	forwardProxyUrl      string
+	privateForward       bool
+	forwardProxyAuthMode int
+	forwardProxyAuth     string
+	// 受け入れ可能な IP
+	acceptableIPList []net.IPNet
+	pacCtrl          *PacCtrl
+	// 変換するリクエストヘッダマップ。
+	// ヘッダ名 → ヘッダ値。
+	// 指定のヘッダ名のヘッダを置き換える。
+	convHeaderMap map[string]string
+	// forward しない host のリスト
+	directHostList []string
 }
 
 func setupGoproxy(proxy *goproxy.ProxyHttpServer) {
@@ -50,26 +57,28 @@ func setupGoproxy(proxy *goproxy.ProxyHttpServer) {
 }
 
 func newAuthProxyServer(
-	port int, forwardProxyUrl string, user string, privateForward bool,
-    forwardProxyAuthMode int, forwardProxyAuth string,
-    acceptableIPList []net.IPNet, pacUrl string ) *AuthProxyServer {
+	forwardProxyUrl string, user string, privateForward bool,
+	forwardProxyAuthMode int, forwardProxyAuth string,
+	acceptableIPList []net.IPNet, pacUrl string,
+	convHeaderMap map[string]string,
+	directHostList []string) *AuthProxyServer {
 	log.Printf("forwardProxyUrl: %s\n", forwardProxyUrl)
 
+	var pacCtrl *PacCtrl
+	if pacUrl != "" {
+		if workPacCtrl, err := getProxyPacCtrl(pacUrl); err != nil {
+			log.Fatal(err)
+		} else {
+			pacCtrl = workPacCtrl
+		}
+	}
+	//fmt.Print( pacCtrl.getProxyUrlTxt( "https://www.yahoo.co.jp" ) )
 
-    var pacCtrl *PacCtrl
-    if pacUrl != "" {
-        if workPacCtrl, err := getProxyPacCtrl( pacUrl ); err != nil {
-            log.Fatal( err )
-        } else {
-            pacCtrl = workPacCtrl
-        }
-    }
-    //fmt.Print( pacCtrl.getProxyUrlTxt( "https://www.yahoo.co.jp" ) )
-    
 	authProxyServer := AuthProxyServer{
 		map[string]bool{}, forwardProxyUrl, privateForward,
-        forwardProxyAuthMode, forwardProxyAuth, acceptableIPList, pacCtrl,
-    }
+		forwardProxyAuthMode, forwardProxyAuth, acceptableIPList, pacCtrl,
+		convHeaderMap, directHostList,
+	}
 	if user != "" {
 		auth := base64.StdEncoding.EncodeToString([]byte(user))
 		authProxyServer.idPassBasicMap[auth] = true
@@ -97,35 +106,44 @@ func (proxy *AuthProxyServer) checkAuth(auth string) string {
 //
 // @param forwardReq forward 先の proxy の request
 // @param req forward 元の request
-func (proxy *AuthProxyServer) setProxyAuth( forwardReq, req *http.Request ) {
-    if proxy.forwardProxyAuthMode == ForwardProxyAuthModeNone {
-        // proxy 認証情報を forwardProxyUrl に渡さない
-    } else if proxy.forwardProxyAuthMode == ForwardProxyAuthModePass {
-        // この proxy と同じ認証情報を使用する
-        forwardReq.Header.Add( ProxyAuthHeaderName, req.Header.Get(ProxyAuthHeaderName) )
-    } else if proxy.forwardProxyAuthMode == ForwardProxyAuthModeSpec {
-        // 所定の proxy 認証情報を使用する
-        forwardReq.Header.Add( ProxyAuthHeaderName, "Basic " + proxy.forwardProxyAuth )
-    }
+func (proxy *AuthProxyServer) setProxyAuth(forwardReq, req *http.Request) {
+	if proxy.forwardProxyAuthMode == ForwardProxyAuthModeNone {
+		// proxy 認証情報を forwardProxyUrl に渡さない
+	} else if proxy.forwardProxyAuthMode == ForwardProxyAuthModePass {
+		// この proxy と同じ認証情報を使用する
+		forwardReq.Header.Add(ProxyAuthHeaderName, req.Header.Get(ProxyAuthHeaderName))
+	} else if proxy.forwardProxyAuthMode == ForwardProxyAuthModeSpec {
+		// 所定の proxy 認証情報を使用する
+		forwardReq.Header.Add(ProxyAuthHeaderName, "Basic "+proxy.forwardProxyAuth)
+	}
 }
 
-func (proxy *AuthProxyServer) getFowardProxyUrl( req *http.Request) string {
-    if proxy.pacCtrl == nil {
-        return proxy.forwardProxyUrl
-    }
-    url, err := proxy.pacCtrl.getProxyUrlTxt( req.URL.String() );
-    if err != nil {
-        log.Fatal( err )
-    }
-    return url
+func (proxy *AuthProxyServer) getFowardProxyUrl(req *http.Request) string {
+	if proxy.directHostList != nil {
+		for _, host := range proxy.directHostList {
+			if host == req.URL.Hostname() {
+				log.Println("direct -- " + req.URL.String())
+				return ""
+			}
+		}
+	}
+
+	if proxy.pacCtrl == nil {
+		return proxy.forwardProxyUrl
+	}
+	url, err := proxy.pacCtrl.getProxyUrlTxt(req.URL.String())
+	if err != nil {
+		log.Fatal(err)
+	}
+	return url
 }
 
 func (proxy *AuthProxyServer) forward(
-    forwardProxyUrl string, 
-    respWriter http.ResponseWriter, req *http.Request) int {
+	forwardProxyUrl string,
+	respWriter http.ResponseWriter, req *http.Request) int {
 	log.Printf("forward: %s\n", req.URL.String())
 
-	forwardUrl, err := url.Parse( forwardProxyUrl )
+	forwardUrl, err := url.Parse(forwardProxyUrl)
 	if err != nil {
 		log.Println(err)
 		return 500
@@ -133,10 +151,10 @@ func (proxy *AuthProxyServer) forward(
 
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(forwardUrl),
-        TLSClientConfig: &tls.Config{
-            // proxy サーバの CA 認証チェックしない
-            InsecureSkipVerify: true,
-        },        
+		TLSClientConfig: &tls.Config{
+			// proxy サーバの CA 認証チェックしない
+			InsecureSkipVerify: true,
+		},
 	}
 	client := &http.Client{
 		Transport: transport,
@@ -147,13 +165,13 @@ func (proxy *AuthProxyServer) forward(
 		log.Printf("NewRequest: %s", err)
 		return 500
 	}
-    // ヘッダ設定を一旦 clone し、proxy 認証情報 を削除する。
-    forwardReq.Header = req.Header.Clone()
-    forwardReq.Header.Del( ProxyAuthHeaderName )
+	// ヘッダ設定を一旦 clone し、proxy 認証情報 を削除する。
+	forwardReq.Header = req.Header.Clone()
+	forwardReq.Header.Del(ProxyAuthHeaderName)
 
-    // モードに応じて proxy 認証情報を設定
-    proxy.setProxyAuth( forwardReq, req )
-        
+	// モードに応じて proxy 認証情報を設定
+	proxy.setProxyAuth(forwardReq, req)
+
 	forwardResp, err := client.Do(forwardReq)
 	if err != nil {
 		log.Printf("Do: %s", err)
@@ -161,7 +179,7 @@ func (proxy *AuthProxyServer) forward(
 	}
 	//defer forwardReq.Body.Close()
 
-	data, err := ioutil.ReadAll(forwardResp.Body)
+	data, err := io.ReadAll(forwardResp.Body)
 	if err != nil {
 		log.Println(err)
 		return 500
@@ -169,42 +187,42 @@ func (proxy *AuthProxyServer) forward(
 
 	for key, valList := range forwardResp.Header {
 		for _, val := range valList {
-            respWriter.Header().Add( key, val )
+			respWriter.Header().Add(key, val)
 		}
 	}
-    
+
 	respWriter.WriteHeader(forwardResp.StatusCode)
 	respWriter.Write(data)
 	return 0
 }
 
-func (proxy *AuthProxyServer) checkAccept( req *http.Request ) bool {
-    if len( proxy.acceptableIPList ) == 0 {
-        return true
-    }
-    addrTxt := req.RemoteAddr
-    if loc := strings.Index( addrTxt, ":" ); loc != -1 {
-        addrTxt = addrTxt[:loc]
-    }
-    
-    if remoteAddr := net.ParseIP( addrTxt ); remoteAddr != nil {
-        for _, acceptableIP := range( proxy.acceptableIPList ) {
-            if acceptableIP.Contains( remoteAddr ) {
-                return true
-            }
-        }
-    }
-    log.Printf( "reject access from %v", req.RemoteAddr )
-    return false
+func (proxy *AuthProxyServer) checkAccept(req *http.Request) bool {
+	if len(proxy.acceptableIPList) == 0 {
+		return true
+	}
+	addrTxt := req.RemoteAddr
+	if loc := strings.Index(addrTxt, ":"); loc != -1 {
+		addrTxt = addrTxt[:loc]
+	}
+
+	if remoteAddr := net.ParseIP(addrTxt); remoteAddr != nil {
+		for _, acceptableIP := range proxy.acceptableIPList {
+			if acceptableIP.Contains(remoteAddr) {
+				return true
+			}
+		}
+	}
+	log.Printf("reject access from %v", req.RemoteAddr)
+	return false
 }
 
 func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 
-	log.Printf("RemoteAddr: %v, %s", req.URL.IsAbs(), req.RemoteAddr )
-    if !proxy.checkAccept( req ) {
-        resp.WriteHeader(400)
-        return
-    }
+	log.Printf("RemoteAddr: %v, %s", req.URL.IsAbs(), req.RemoteAddr)
+	if !proxy.checkAccept(req) {
+		resp.WriteHeader(400)
+		return
+	}
 
 	if len(proxy.idPassBasicMap) != 0 {
 		for key := range req.Header {
@@ -218,6 +236,13 @@ func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Requ
 			return
 		}
 	}
+	if len(proxy.convHeaderMap) != 0 {
+		newHeader := req.Header.Clone()
+		for key := range proxy.convHeaderMap {
+			newHeader[key] = []string{proxy.convHeaderMap[key]}
+		}
+		req.Header = newHeader
+	}
 
 	privateAccess := false
 	if hostIp := net.ParseIP(req.URL.Hostname()); hostIp != nil {
@@ -225,11 +250,11 @@ func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Requ
 	}
 
 	aGoproxy := goproxy.NewProxyHttpServer()
-	setupGoproxy( aGoproxy )
+	setupGoproxy(aGoproxy)
 
-    forwardProxyUrl := proxy.getFowardProxyUrl( req )
+	forwardProxyUrl := proxy.getFowardProxyUrl(req)
 
-    log.Printf( "forwardProxyUrl -- %s", forwardProxyUrl )
+	log.Printf("forwardProxyUrl -- %s", forwardProxyUrl)
 
 	if forwardProxyUrl == "" {
 		// forwardProxyUrl がない場合は、 goproxy に処理を任せる
@@ -246,7 +271,11 @@ func (proxy *AuthProxyServer) ServeHTTP(resp http.ResponseWriter, req *http.Requ
 		log.Printf("forward CONNECT: %s", req.URL.String())
 		aGoproxy.ConnectDial = aGoproxy.NewConnectDialToProxyWithHandler(
 			forwardProxyUrl, func(forwardReq *http.Request) {
-                proxy.setProxyAuth( forwardReq, req )
+				for key := range proxy.convHeaderMap {
+					forwardReq.Header.Add(key, proxy.convHeaderMap[key])
+					log.Printf("Header %s, %s", key, proxy.convHeaderMap[key])
+				}
+				proxy.setProxyAuth(forwardReq, req)
 			})
 		aGoproxy.ServeHTTP(resp, req)
 	} else {
@@ -271,62 +300,80 @@ func main() {
 		os.Exit(1)
 	}
 
-	portOpt := cmd.Int("p", 0, "port (mandatory)")
+	portOpt := cmd.String("p", "", "[host]:port (mandatory)")
 	userOpt := cmd.String("user", "", "proxy id:pass. e.g. id=123, pass=abc, -user 123:abc")
 	forwardProxyUrl := cmd.String("forward", "", "forward proxy (e.g. http://proxy.addr:port/). pass this auth.")
 	privateForward := cmd.Bool("pf", false, "When host is private address, it uses forwarding.")
-    forwardProxyAuthModeStr := cmd.String(
-        "forwardAuth", "pass",
-        "forward proxy auth mode. \n   - none\n   - pass\n   - spec:id:pass\n" )
-    acceptableIP := cmd.String(
-        "aip", "", "accepable IP. \n  e.g. 192.168.0.1/24\n       192.168.0.1/32" )
-    forwardPacUrl := cmd.String(
-        "forwardPac", "",
-        "forward proxy pac url. e.g. http://proxy.addr/proxy.pac" )
-    enableHttps := cmd.Bool(
-        "https", false, "This option enable https listening" )
-        
+	forwardProxyAuthModeStr := cmd.String(
+		"forwardAuth", "pass",
+		"forward proxy auth mode. \n   - none\n   - pass\n   - spec:id:pass\n")
+	acceptableIP := cmd.String(
+		"aip", "", "accepable IP. \n  e.g. 192.168.0.1/24\n       192.168.0.1/32")
+	forwardPacUrl := cmd.String(
+		"forwardPac", "",
+		"forward proxy pac url. e.g. http://proxy.addr/proxy.pac")
+	enableHttps := cmd.Bool(
+		"https", false, "This option enable https listening")
+	header := cmd.String(
+		"H", "", "override headers. e.g. Header1:=Value1::Header2:=Value2")
+	directs := cmd.String(
+		"direct", "", "The host name to connecting directly. e.g. host1,host2,host3")
 
 	cmd.Parse(os.Args[1:])
 
 	port := *portOpt
-	if port == 0 {
+	if port == "" {
 		cmd.Usage()
 	}
 	if *help {
 		cmd.Usage()
 	}
 
-    forwardProxyAuthMode := ForwardProxyAuthModeNone
-    forwardProxyAuth := ""
-    if *forwardProxyAuthModeStr == "none" {
-        forwardProxyAuthMode = ForwardProxyAuthModeNone
-    } else if *forwardProxyAuthModeStr == "pass" {
-        forwardProxyAuthMode = ForwardProxyAuthModePass
-    } else if strings.Index( *forwardProxyAuthModeStr, "spec:" ) == 0 {
-        forwardProxyAuthMode = ForwardProxyAuthModeSpec
-        auth := (*forwardProxyAuthModeStr)[ len( "spec:" ): ]
-        forwardProxyAuth = base64.StdEncoding.EncodeToString([]byte(auth))
-    } else {
-        cmd.Usage()
-    }
+	forwardProxyAuthMode := ForwardProxyAuthModeNone
+	forwardProxyAuth := ""
+	if *forwardProxyAuthModeStr == "none" {
+		forwardProxyAuthMode = ForwardProxyAuthModeNone
+	} else if *forwardProxyAuthModeStr == "pass" {
+		forwardProxyAuthMode = ForwardProxyAuthModePass
+	} else if strings.Index(*forwardProxyAuthModeStr, "spec:") == 0 {
+		forwardProxyAuthMode = ForwardProxyAuthModeSpec
+		auth := (*forwardProxyAuthModeStr)[len("spec:"):]
+		forwardProxyAuth = base64.StdEncoding.EncodeToString([]byte(auth))
+	} else {
+		cmd.Usage()
+	}
 
-    acceptableIPList := []net.IPNet{}
-    if _, ipnet, err := net.ParseCIDR( *acceptableIP ); err == nil {
-        log.Printf( "aip %v", *ipnet )
-        acceptableIPList = append( acceptableIPList, *ipnet )
-    }
+	acceptableIPList := []net.IPNet{}
+	if _, ipnet, err := net.ParseCIDR(*acceptableIP); err == nil {
+		log.Printf("aip %v", *ipnet)
+		acceptableIPList = append(acceptableIPList, *ipnet)
+	}
+
+	convHeaderMap := map[string]string{}
+	if *header != "" {
+		for _, keyval := range strings.Split(*header, "::") {
+			tokens := strings.Split(keyval, ":=")
+			if len(tokens) != 2 {
+				log.Printf("%s is invalid", keyval)
+				cmd.Usage()
+			}
+			convHeaderMap[tokens[0]] = tokens[1]
+		}
+	}
+
+	directHostList := strings.Split(*directs, ",")
 
 	proxy := newAuthProxyServer(
-        port, *forwardProxyUrl, *userOpt, *privateForward,
-        forwardProxyAuthMode, forwardProxyAuth, acceptableIPList, *forwardPacUrl )
+		*forwardProxyUrl, *userOpt, *privateForward,
+		forwardProxyAuthMode, forwardProxyAuth, acceptableIPList,
+		*forwardPacUrl, convHeaderMap, directHostList)
 
 	log.Print("start -- ", port)
 
-    service := fmt.Sprintf(":%d", port)
-    if *enableHttps {
-        log.Fatal(http.ListenAndServeTLS(service, "server.crt", "server.key", proxy))
-    } else {
-        log.Fatal(http.ListenAndServe(service, proxy))
-    }
+	service := port
+	if *enableHttps {
+		log.Fatal(http.ListenAndServeTLS(service, "server.crt", "server.key", proxy))
+	} else {
+		log.Fatal(http.ListenAndServe(service, proxy))
+	}
 }
